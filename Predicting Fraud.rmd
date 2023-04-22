@@ -1,0 +1,149 @@
+---
+title: "Predicting Fraud"
+author: "Tamalika Basu"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+
+
+## Step 1: Explore the data
+# Load data
+set.seed(442)
+loan_train1 <- read.csv("loan_train_final.csv")
+dim(loan_train1)
+
+# Performing basic EDA
+summary(loan_train1)
+
+# Check for nulls
+sum(is.null(loan_train1))
+
+# check for NA
+sum(is.na(loan_train1))
+loan_train <- na.omit(loan_train1)
+
+## Step 2: Identify which model to use: 
+# To predict the probability of a customer defaulting, we can use a logistic regression model as the predictor variable is Boolean
+
+# To apply logistic regression, we should check if the target variable is balanced
+table(loan_train$default) 
+
+# The data is not balanced, therefore we cannot upright apply logistic regression here. One way to handle this would be to under-sample from the training set, which involves randomly removing some observations from the majority class to balance the dataset. 
+
+# get indices of each class
+class_0_idx <- which(loan_train$default == 0)
+class_1_idx <- which(loan_train$default == 1)
+
+# get number of instances in each class
+n_class_0 <- length(class_0_idx)
+n_class_1 <- length(class_1_idx)
+
+# downsample the class 0 to match class 1
+downsampled_class_0_idx <- sample(class_0_idx, n_class_1, replace = FALSE)
+
+# combine both classes
+downsampled_idx <- c(class_1_idx, downsampled_class_0_idx)
+
+# subset the data using downsampled indices
+downsampled_data <- loan_train[downsampled_idx, ]
+
+# Now check if the balancing has been obtained
+dim(downsampled_data)
+table(downsampled_data$default)
+
+## Step 3: Perform variable selection since there are 31 predictors
+# To perform variable selection, we can apply a Logistic CV-Lasso regression. Lasso will help identify essential features, Using CV with Lasso we will get the optimal lambda that we can use for regularizing the Lasso model
+
+# New data sets after down-sampling
+X <- model.matrix(default ~., data=downsampled_data)[,-1]
+Y <- downsampled_data[,"default"]
+
+# Apply cv to get the optimal lambda
+cv.lambda.lasso <- cv.glmnet(x=X, y=Y, alpha=1)
+plot(cv.lambda.lasso)
+cv.lambda.lasso
+
+lam_min <- cv.lambda.lasso$lambda.min
+sprintf("Thus, min lambda is at %f", lam_min)
+
+
+## Step 4: Run the logistic regression model
+# Now run the logistic regression model
+lasso.model <- glmnet(x=X, y=Y,alpha  = 1, family="binomial", lambda = lam_min,standardize = TRUE)
+lasso.model$beta
+
+# From the summary above, the coefficients of beta which are non 0 are significantly contributing to the model (27 of them as seen from the coefficient count from cv.lambda.lasso model)
+cv.lambda.lasso
+
+## Step 5: Use the model for predictions of probability of defaulting of a customer using the test data
+# Load test data
+loan_test1 <- read.csv("loan_test_final.csv")
+loan_test <- na.omit(loan_test1)
+
+# Extract predictor variables
+X_test <- model.matrix(default ~., data=loan_test)[,-1]
+dim(X_test)
+
+# Predict probabilities of default using logistic regression model
+options(scipen = 999)
+prob_default <- predict(lasso.model, newx=X_test, type="response")
+
+## Step 6: Calculate predicted loss (probability of default * amount)
+pred_loss <- prob_default*loan_test$amount
+
+## Step 7: Calculate MAE abs(actual loss minus predicted loss)/n
+actual_loss <- loan_test$default*(loan_test$amount)
+
+MAE <- mean(abs(actual_loss - pred_loss))
+print(paste0("MAE on test set: ", round(MAE, 4)))
+
+## Step 8: Now, we can further classify customers as "Default vs Not Default" based on cut off values
+
+# To classify, we can do a risk analysis of a type 1 error vs type 2 error to classify the probabilities as "default" vs "not default"
+
+# H0: Customer will not default
+# H1: Customer will default
+
+# Therefore, Type 1 error: concluding customer will default when he/she will actually not default. Type 2 error: concluding customer will not default when he/she will actually default. 
+
+# Based on risk analysis between Type 1 and Type 2 errors, we can decide a cutoff value while ensuring to consider the Type 2 as a more expensive error in this case to occur for a firm. Values higher than the cut off will classify as "default", values lower than cut off will classify as "not default"
+
+# Thus for ex, if cut off is 0.7 or 70%, it means, customers with a probability of defaulting as high as 69% will be marked as "Not Default" which is basically type 2 error. This is a loss for the firm. Hence, the ideal approach would be to consider a strict cut-off like 30% or 40% for the firm to remain profitable and strictly mark potential defaulting customers
+
+# Additionally, we can also plot ROC curve, and the area under the curve is a  measure of the model's ability to distinguish between the two classes, and it provides an overall assessment of the model's performance across a range of classification thresholds. An AUC of 0.5 indicates that the model performs no better than random guessing, while an AUC of 1.0 indicates perfect classification.
+
+# For example, Taking a 30% cut off
+prob_cutoff <- ifelse(prob_default > 0.3,1,0)
+roc_data <- roc(loan_test$default,prob_cutoff)
+auc_value <- round(auc(roc_data), 2)*100
+
+plot(roc_data, main="ROC Curve")
+text(0.6, 0.2, paste("AUC =", auc_value, "%"), col="red", cex=1.5)
+
+```
+
+
+
+To conclude, here is the write-up as asked in the question:
+In order to identify high risk customers with chances of defaulting using the given dataset, we apply the following steps:
+
+- First, explore the 'train' dataset given by performing exploratory data analysis such as checking for null rows, NA values. NA values were present under the column 'employment' which are handled by omitting from the train dataset
+
+- Second, choose an appropriate model for the given business problem. According to me, a logistic regression would be best here since the predictor is Boolean class. However, since there are 30 variables present, we cannot ideally consider all the variables in our model as it might lead to a well training fit but poor performance on the training data (overfitting). Hence, to perform feature selection, I decided to chose a CV Lasso regularisation, where an optimal lambda can be obtained from CV, which can further be used in Lasso as the lambda parameter
+
+- Third, before applying logistic, I checked if the dataset is balanced since logistic regression is applicable for balanced sets. The train set was not balanced hence I downsampled the oversampled class in the train set based on the proportion of the undersampled class. And hence, obtained a similar proportion of both classes or equal representation of both classes in the train set. 
+
+- Fourth, Applied CV to obtain the lambda min from the downsampled train dataset. Followed by, running the logistic regression using the lambda value obtained (shortlisted 27 essential features)
+
+- Fifth, Now that we have the model, we can use it to predict the probabilities from test dataset.Therefore now, I loaded the test dataset, cleaned the NA values present and predicted the probabilities of 'defaulting' on the test dataset
+
+- Sixth, calculate predicted loss using probabilities * amounts
+- Seventh, Finally we calculate MAE, where Actual loss = amounts * default
+
+- Eighth, Finally, to classify a customer as "default" vs "not default" we need to consider a threshold value. I did a risk analysis of Type 1 vs Type 2 to determine the cut off value. As the type 2 error is more serious in this case, I concluded that a lower cut off will righfully catch the defaulters based on my chosen hypothesis (mentioned in the steps performed). 
+
+To determine the cut off value for classification, we can also calculate accuracy measures like sensitivity, accuracy to analyze the acceptable level of these measures based on business requirement
+
+```
